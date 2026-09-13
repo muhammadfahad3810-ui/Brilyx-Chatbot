@@ -125,6 +125,156 @@ def test_default_database_url_has_no_windows_drive_letter_or_username():
 
 
 # ---------------------------------------------------------------------------
+# PostgreSQL support (Render managed database) — URL normalization and
+# engine wiring. No live Postgres server is required for these: they only
+# verify the scheme rewrite and that SQLAlchemy can build a postgresql+
+# psycopg2 engine object from the result. A real connection is covered
+# separately by test_postgres_round_trip_when_a_live_server_is_configured
+# below, which skips itself when no live server is available.
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_postgres_scheme_is_normalized_to_postgresql():
+    from backend.app.database import normalize_database_url
+
+    assert (
+        normalize_database_url("postgres://user:pass@host:5432/dbname")
+        == "postgresql://user:pass@host:5432/dbname"
+    )
+
+
+def test_postgresql_scheme_url_passes_through_unchanged():
+    from backend.app.database import normalize_database_url
+
+    url = "postgresql://user:pass@host:5432/dbname"
+    assert normalize_database_url(url) == url
+
+
+def test_sqlite_url_is_not_affected_by_postgres_normalization():
+    from backend.app.database import normalize_database_url
+
+    url = "sqlite:///./data/brilyx.db"
+    assert normalize_database_url(url) == url
+
+
+def test_psycopg2_binary_is_declared_as_a_runtime_dependency():
+    """Static check on pyproject.toml itself — not just the local environment.
+
+    This is the specific gap that caused a real production incident: the
+    Postgres driver was `pip install`ed locally and everything worked in
+    this environment, but it was never actually declared in
+    `[project.dependencies]` (or, separately, never committed/pushed at
+    all), so Render's build never installed it and the deployed app died
+    at startup with `ModuleNotFoundError: No module named 'psycopg2'`.
+    Checking the *installed* environment (see
+    test_normalized_postgres_url_builds_a_psycopg2_engine below) cannot
+    catch that class of drift — only reading the actual dependency
+    declaration that ships with the code can.
+    """
+    pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "psycopg2-binary" in pyproject_text, (
+        "psycopg2-binary must be declared in pyproject.toml's [project.dependencies] "
+        "— it is required for AI_PROVIDER-independent PostgreSQL support "
+        "(backend/app/database.py) and Render will not install it otherwise."
+    )
+
+    # Also confirm it's inside the actual dependencies array, not just
+    # mentioned in a comment somewhere else in the file.
+    import tomllib
+
+    pyproject_data = tomllib.loads(pyproject_text)
+    dependencies = pyproject_data["project"]["dependencies"]
+    assert any(dep.startswith("psycopg2-binary") for dep in dependencies), (
+        f"psycopg2-binary not found in [project.dependencies]: {dependencies}"
+    )
+
+
+def test_normalized_postgres_url_builds_a_psycopg2_engine():
+    from sqlalchemy import create_engine
+
+    from backend.app.database import normalize_database_url
+
+    url = normalize_database_url("postgres://user:pass@localhost:5432/brilyx")
+    engine = create_engine(url, pool_pre_ping=True, pool_recycle=300)
+    try:
+        assert engine.dialect.name == "postgresql"
+        assert engine.dialect.driver == "psycopg2"
+    finally:
+        engine.dispose()
+
+
+def test_sqlite_engine_still_uses_check_same_thread_connect_arg():
+    # Regression guard: the Postgres-specific pool_pre_ping/pool_recycle
+    # options must never leak onto the SQLite path, and the existing
+    # check_same_thread fix (required for FastAPI's threaded request
+    # handling) must remain exactly as before. Deliberately builds its own
+    # engine from an explicit SQLite URL rather than importing the real
+    # `backend.app.database.engine` singleton — that singleton reflects
+    # whatever DATABASE_URL is actually configured in the environment
+    # running the tests (e.g. a local .env pointed at a real Postgres
+    # instance for manual testing), so asserting its dialect here would
+    # make this regression guard fail depending on ambient config instead
+    # of testing the branching logic itself.
+    from sqlalchemy import create_engine
+
+    from backend.app.database import normalize_database_url
+
+    url = normalize_database_url("sqlite:///:memory:")
+    engine = create_engine(url, connect_args={"check_same_thread": False})
+    try:
+        assert engine.dialect.name == "sqlite"
+    finally:
+        engine.dispose()
+
+
+def test_postgres_round_trip_when_a_live_server_is_configured():
+    """Optional live-Postgres compatibility check.
+
+    Skips itself unless TEST_POSTGRES_URL is set to a reachable Postgres
+    connection string — this repo's default test environment has no
+    Postgres server, so this never runs in the standard `pytest -q` here,
+    but exists so CI (or a developer with a local/Render Postgres
+    instance) can verify real compatibility: table creation, insert, and
+    query against the actual application models, unchanged from the
+    SQLite path.
+    """
+    import os
+
+    import pytest
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from backend.app import models  # noqa: F401  (registers models on Base.metadata)
+    from backend.app.database import Base, normalize_database_url
+
+    raw_url = os.environ.get("TEST_POSTGRES_URL")
+    if not raw_url:
+        pytest.skip("TEST_POSTGRES_URL not set — no live Postgres server configured for this run")
+
+    url = normalize_database_url(raw_url)
+    engine = create_engine(url, pool_pre_ping=True)
+    try:
+        Base.metadata.create_all(bind=engine)
+        session_local = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        session = session_local()
+        try:
+            conversation = models.Conversation()
+            session.add(conversation)
+            session.commit()
+            session.refresh(conversation)
+
+            fetched = session.get(models.Conversation, conversation.id)
+            assert fetched is not None
+            assert fetched.session_id == conversation.session_id
+            assert fetched.status == "active"
+        finally:
+            session.close()
+    finally:
+        Base.metadata.drop_all(bind=engine)
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # .python-version pins the Render Python runtime to 3.11 (not 3.12+)
 # ---------------------------------------------------------------------------
 

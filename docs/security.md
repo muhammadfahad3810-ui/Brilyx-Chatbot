@@ -279,6 +279,26 @@ count, not the underlying value.
   Password**, not the account's normal password — Gmail rejects
   plain-password SMTP login. This project implements no mechanism to
   bypass that requirement.
+- **`GEMINI_API_KEY`** (added alongside `GeminiProvider` —
+  `backend/app/ai/gemini.py`): same treatment as every other secret —
+  `.env.example` leaves it blank, no test embeds a real key (all Gemini
+  tests inject a fake `google.genai.Client` and use an obviously-fake
+  string like `"test-key"`), and `GeminiProvider` never includes the raw
+  key value in any exception it raises — verified by
+  `tests/ai/test_gemini_provider.py::test_api_key_never_appears_in_a_raised_error_message`.
+  `GeminiProvider` is only ever constructed when `AI_PROVIDER=gemini` is
+  explicitly selected; the default `AI_PROVIDER=ollama` never touches
+  Gemini or this key at all.
+- **`GROQ_API_KEY`** (added alongside `GroqProvider` —
+  `backend/app/ai/groq.py`): same treatment as every other secret —
+  `.env.example` leaves it blank, no test embeds a real key (all Groq
+  tests inject a fake `groq.Groq` client and use an obviously-fake string
+  like `"test-key"`), and `GroqProvider` never includes the raw key value
+  in any exception it raises — verified by
+  `tests/ai/test_groq_provider.py::test_api_key_never_appears_in_a_raised_error_message`.
+  `GroqProvider` is only ever constructed when `AI_PROVIDER=groq` is
+  explicitly selected; the default `AI_PROVIDER=ollama` never touches
+  Groq or this key at all.
 
 ## Event / Notification Abuse Protection
 

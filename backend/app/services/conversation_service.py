@@ -1,7 +1,11 @@
+import logging
+
 from sqlalchemy.orm import Session
 
 from backend.app.ai.base import ChatMessage
 from backend.app.models import Conversation, ConversationStatus, Message
+
+logger = logging.getLogger("brilyx.conversations")
 
 
 class ConversationNotFoundError(Exception):
@@ -33,6 +37,16 @@ def create_conversation(db: Session) -> Conversation:
 def get_conversation(db: Session, conversation_id: str) -> Conversation:
     conversation = db.get(Conversation, conversation_id)
     if conversation is None:
+        # Server-side-only observability: both this and
+        # ConversationAccessDeniedError map to the identical client-facing
+        # 404 (see routers/conversations.py) — that ambiguity is
+        # intentional and must never leak into the HTTP response. This log
+        # line exists purely so operators can tell "no such conversation"
+        # apart from "wrong/missing token" (see verify_conversation_access
+        # below) without weakening that guarantee. Never logs a token or
+        # session_id — conversation_id is the public resource identifier,
+        # already returned to every caller.
+        logger.info("conversation access denied: reason=not_found conversation_id=%s", conversation_id)
         raise ConversationNotFoundError(conversation_id)
     return conversation
 
@@ -56,6 +70,16 @@ def verify_conversation_access(conversation: Conversation, token: str | None) ->
     docs/security.md for the full threat-model discussion.
     """
     if not token or token != conversation.session_id:
+        # Server-side-only observability (see get_conversation above for
+        # why this exists and what it must never do). Logs only whether a
+        # token was present, never its value and never the real
+        # session_id — a wrong-token attempt must never let an operator
+        # (or anything reading the log) recover the correct token.
+        logger.info(
+            "conversation access denied: reason=invalid_token conversation_id=%s token_provided=%s",
+            conversation.id,
+            bool(token),
+        )
         raise ConversationAccessDeniedError(conversation.id)
 
 

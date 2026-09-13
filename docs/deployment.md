@@ -46,11 +46,20 @@ values — `.env.example` documents names and safe placeholders only.
 |---|---|---|---|
 | `APP_NAME` | No | Display name in FastAPI's OpenAPI metadata | `Brilyx Chatbot` |
 | `ENVIRONMENT` | **Yes, for production** | Set to `production` to activate startup config validation (see section 7 of `docs/security.md`) | `production` |
-| `DATABASE_URL` | No | SQLAlchemy connection string | `sqlite:///./data/brilyx.db` |
-| `AI_PROVIDER` | No | Which AI backend to use | `ollama` |
-| `OLLAMA_BASE_URL` | **Yes, if Ollama isn't on localhost** | Where the backend reaches Ollama | `http://localhost:11434` |
+| `DATABASE_URL` | No | SQLAlchemy connection string. Defaults to local SQLite; **production deployments (e.g. Render) should set this to a managed PostgreSQL connection string** instead — see `docs/deployment-render.md` "Database". A bare `postgres://` scheme is automatically rewritten to `postgresql://` (`backend/app/database.py::normalize_database_url`), so either form works. | `sqlite:///./data/brilyx.db` (dev) / `postgresql://user:pass@host:5432/dbname` (production) |
+| `AI_PROVIDER` | No | `ollama` (default, free/local), `gemini` (cloud, paid), or `groq` (cloud, paid) — see section 5 | `ollama` |
+| `OLLAMA_BASE_URL` | **Yes, if using `AI_PROVIDER=ollama` and it isn't on localhost** | Where the backend reaches Ollama | `http://localhost:11434` |
 | `OLLAMA_MODEL` | No | Model name Ollama must have pulled | `qwen2.5:3b-instruct-q4_K_M` |
 | `OLLAMA_TIMEOUT_SECONDS` | No | Per-request timeout to Ollama | `60` |
+| `GEMINI_API_KEY` | **Yes, if using `AI_PROVIDER=gemini`** | Real Google Gemini API key — never committed | *(set in your hosting platform's env var UI only)* |
+| `GEMINI_MODEL` | No | Gemini model name | `gemini-2.0-flash` |
+| `GEMINI_TIMEOUT_SECONDS` | No | Per-request timeout to Gemini | `60` |
+| `GROQ_API_KEY` | **Yes, if using `AI_PROVIDER=groq`** | Real Groq API key — never committed | *(set in your hosting platform's env var UI only)* |
+| `GROQ_MODEL` | No | Groq model name for the main chat reply | `openai/gpt-oss-120b` |
+| `GROQ_TIMEOUT_SECONDS` | No | Per-request timeout to Groq | `60` |
+| `GROQ_MAX_TOKENS` | No | Caps the main chat reply's output length — required to stay under Groq's tokens-per-minute limit (see `docs/ai-engine.md` "Groq tokens-per-minute (TPM) limit") | `800` |
+| `GROQ_EXTRACTION_MODEL` | No | Separate, smaller Groq model used only for structured lead-extraction, so it doesn't compete with the main chat call's TPM budget | `openai/gpt-oss-20b` |
+| `GROQ_EXTRACTION_MAX_TOKENS` | No | Caps the extraction call's output — must stay well above the extraction model's own hidden reasoning-token usage (see `docs/ai-engine.md`) | `1200` |
 | `CHAT_HISTORY_MAX_MESSAGES` | No | How many prior messages are replayed to the model | `20` |
 | `CHAT_MAX_MESSAGE_LENGTH` | No | Max visitor message length | `4000` |
 | `CORS_ALLOWED_ORIGINS` | **Yes** | Comma-separated browser origins allowed to call this API | `https://www.brilyx.com` |
@@ -86,13 +95,20 @@ environment supervises this process (systemd, a process manager, a
 platform-specific "web process" convention, etc.) is entirely up to
 Brilyx hosting's own conventions — this document does not assume one.
 
-## 5. Ollama
+## 5. AI Provider: Ollama (default), Gemini, or Groq
 
-**This is the most important thing to verify before deploying — do not
-assume it will work.** The backend calls Ollama over plain HTTP at
-whatever `OLLAMA_BASE_URL` is configured to (default
-`http://localhost:11434`, meaning "the same machine the backend process
-is running on," not any other meaning).
+**This is one of the most important things to verify before deploying —
+do not assume Ollama will work in your hosting environment.** The
+application supports three AI providers, selected via `AI_PROVIDER` (see
+`docs/ai-engine.md` "Provider Selection: Ollama vs. Gemini vs. Groq" for
+the full reference) — pick whichever fits your hosting situation; none of
+them requires changing any other part of the application.
+
+### Option A — Ollama (`AI_PROVIDER=ollama`, the default)
+
+The backend calls Ollama over plain HTTP at whatever `OLLAMA_BASE_URL` is
+configured to (default `http://localhost:11434`, meaning "the same
+machine the backend process is running on," not any other meaning).
 
 Before deploying, whoever has access to Brilyx hosting must confirm:
 
@@ -113,23 +129,72 @@ Before deploying, whoever has access to Brilyx hosting must confirm:
    actually runs, accounting for any firewall/network policy on that
    hosting platform?
 
+### Option B — Gemini (`AI_PROVIDER=gemini`)
+
+If your hosting environment can't run or reach Ollama, set
+`AI_PROVIDER=gemini` and `GEMINI_API_KEY` (a real Google Gemini API key —
+**never** committed to source control; set it directly in your hosting
+platform's environment variable settings) instead. This is a paid cloud
+API (unlike free/local Ollama) but removes the "where do I run Ollama"
+problem entirely — there's nothing else to host or make reachable.
+`GEMINI_MODEL` defaults to `gemini-2.0-flash` and can be overridden if
+needed. See `docs/ai-engine.md` for the full configuration reference.
+
+### Option C — Groq (`AI_PROVIDER=groq`)
+
+Another cloud alternative if your hosting environment can't run or reach
+Ollama: set `AI_PROVIDER=groq` and `GROQ_API_KEY` (a real Groq API key —
+**never** committed to source control; set it directly in your hosting
+platform's environment variable settings). Like Gemini, this is a paid
+cloud API but removes the "where do I run Ollama" problem entirely.
+
+**`GROQ_MODEL` must be set explicitly in production** —
+`backend/app/config.py`'s own code-level default is stale (it references
+a model no longer available on Groq's current catalog for this account).
+The current, verified production configuration is:
+
+```
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_MAX_TOKENS=800
+GROQ_EXTRACTION_MODEL=openai/gpt-oss-20b
+GROQ_EXTRACTION_MAX_TOKENS=1200
+```
+
+See `docs/ai-engine.md` "Groq tokens-per-minute (TPM) limit" for the full
+reasoning behind each of these four values (model choice, the 413/TPM fix,
+and the separate extraction-model routing).
+
 ## 6. Database
 
-Unchanged, single-file **SQLite** — `backend/app/database.py` creates
-`data/brilyx.db` (relative to the working directory the process is
-started from) automatically on first run via
-`Base.metadata.create_all()`, which only ever adds missing tables, never
-drops or alters existing ones.
+Two supported backends, selected purely by `DATABASE_URL` — no other
+configuration or code change needed either way, since the entire data
+layer (`backend/app/models.py`, and every query in
+`backend/app/services/`, `qualification/`, `leads/`, `events/`) uses only
+portable SQLAlchemy ORM constructs (no raw SQL, no SQLite-only column
+types or syntax).
+
+- **SQLite** (local development default) — single-file
+  `data/brilyx.db`, created automatically on first run via
+  `Base.metadata.create_all()` (adds missing tables only, never drops or
+  alters existing ones).
+- **PostgreSQL** (recommended for production/hosting with ephemeral
+  container filesystems, e.g. Render) — set `DATABASE_URL` to the
+  provider's connection string. `backend/app/database.py::normalize_database_url()`
+  automatically rewrites a legacy `postgres://` scheme to `postgresql://`
+  (required for SQLAlchemy 2.x), so either scheme works. The engine adds
+  `pool_pre_ping=True` and `pool_recycle=300` on the Postgres path only,
+  to tolerate a managed provider silently closing idle connections.
 
 **Persistence consideration for hosting:** if the hosting platform uses
 ephemeral/stateless containers or filesystems that reset between
-deploys/restarts, `data/brilyx.db` — and therefore all conversations,
-leads, and business events — would be lost on every restart. Whoever
-deploys this must ensure the directory containing `data/brilyx.db` is on
-persistent storage appropriate to that hosting platform. This document
-does not migrate to PostgreSQL or any other database — that would be a
-real architectural change, out of scope here, and explicitly not
-requested.
+deploys/restarts, **either** point `DATABASE_URL` at a managed PostgreSQL
+instance (state then lives outside the container entirely — see
+`docs/deployment-render.md` "Database"), **or**, if staying on SQLite,
+ensure the directory containing `data/brilyx.db` is on persistent storage
+appropriate to that hosting platform. Migrations beyond `create_all()`
+(e.g. Alembic) are intentionally not introduced yet — see
+`docs/deployment-render.md` "Database" for the reasoning and what would
+trigger adding one.
 
 ## 7. CORS
 

@@ -9,6 +9,8 @@ deliberately NOT gated by this token (it stays on the original,
 documented, widely-tested Phase 3 contract).
 """
 
+import logging
+
 from backend.app.ai.base import AIResponse
 from backend.app.ai.orchestrator import get_orchestrator
 from backend.app.main import app
@@ -121,6 +123,73 @@ def test_unauthorized_response_never_reveals_whether_the_conversation_exists(cli
 
     assert real_but_wrong.status_code == truly_nonexistent.status_code == 404
     assert real_but_wrong.json() == truly_nonexistent.json()
+
+
+# ---------------------------------------------------------------------------
+# Server-side-only observability: the HTTP response for "doesn't exist" and
+# "wrong/missing token" must stay identical (asserted above), but operators
+# must still be able to tell the two apart from logs alone. See
+# backend/app/services/conversation_service.py.
+# ---------------------------------------------------------------------------
+
+
+def test_wrong_token_logs_invalid_token_reason_not_not_found(client, caplog):
+    created = _create(client)
+
+    with caplog.at_level(logging.INFO, logger="brilyx.conversations"):
+        response = client.get(
+            f"/api/conversations/{created['conversation_id']}/lead",
+            headers={"X-Conversation-Token": "wrong-token"},
+        )
+
+    assert response.status_code == 404
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("reason=invalid_token" in message and created["conversation_id"] in message for message in messages)
+    assert not any("reason=not_found" in message for message in messages)
+
+
+def test_missing_token_logs_invalid_token_reason(client, caplog):
+    created = _create(client)
+
+    with caplog.at_level(logging.INFO, logger="brilyx.conversations"):
+        response = client.get(f"/api/conversations/{created['conversation_id']}/lead")
+
+    assert response.status_code == 404
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "reason=invalid_token" in message and "token_provided=False" in message for message in messages
+    )
+
+
+def test_truly_nonexistent_conversation_logs_not_found_reason(client, caplog):
+    fake_id = "00000000-0000-0000-0000-000000000000"
+
+    with caplog.at_level(logging.INFO, logger="brilyx.conversations"):
+        response = client.get(
+            f"/api/conversations/{fake_id}/lead",
+            headers={"X-Conversation-Token": "irrelevant"},
+        )
+
+    assert response.status_code == 404
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("reason=not_found" in message and fake_id in message for message in messages)
+    assert not any("reason=invalid_token" in message for message in messages)
+
+
+def test_access_denial_logs_never_contain_the_real_or_supplied_token_value(client, caplog):
+    created = _create(client)
+    real_token = created["session_id"]
+    wrong_token = "a-clearly-wrong-token-value"
+
+    with caplog.at_level(logging.INFO, logger="brilyx.conversations"):
+        client.get(
+            f"/api/conversations/{created['conversation_id']}/lead",
+            headers={"X-Conversation-Token": wrong_token},
+        )
+
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert real_token not in log_text
+    assert wrong_token not in log_text
 
 
 def test_session_id_is_returned_by_every_conversation_creating_endpoint(client):

@@ -19,14 +19,29 @@ repeat everything from those files.
   needs to run its own long-lived process with real CPU/RAM for
   inference, which is not what a Render Free web service is for. **Ollama
   must be a separate, externally-reachable service** — see "Ollama" below.
+- 🆕 **An alternative that avoids the Ollama-hosting problem entirely:**
+  set `AI_PROVIDER=gemini` with a real `GEMINI_API_KEY`, or
+  `AI_PROVIDER=groq` with a real `GROQ_API_KEY` (see `docs/ai-engine.md`
+  "Provider Selection: Ollama vs. Gemini vs. Groq"). Both are cloud APIs
+  (not free like Ollama) reachable directly from Render with no separate
+  Ollama hosting needed at all — this removes the Ollama half of the
+  "test/demo only" conclusion below, though it still does not fix Render
+  Free's SQLite persistence limitation.
 - ⚠️ Render Free's filesystem is **not durable production storage** for
-  the SQLite database — see "Database / SQLite Persistence" below.
-- **Conclusion:** deploying this to Render Free, on its own, gives you a
-  **test/demo deployment** — a real public backend you and others can hit
-  over HTTPS, useful for demoing the widget and verifying the deployed
-  code actually runs — not a durable production system. Production, per
-  the existing project plan, is expected to move to your friend's Brilyx
-  hosting once that's ready.
+  the SQLite database — see "Database" below.
+- 🆕 **PostgreSQL removes the storage limitation entirely:** set
+  `DATABASE_URL` to a managed PostgreSQL connection string (Render's own
+  managed Postgres, or any other provider) instead of the default SQLite
+  path. State then lives outside the web service's container filesystem
+  altogether, so it survives redeploys/restarts regardless of which
+  Render tier is used. See "Database" below.
+- **Conclusion:** a **Render Free** web service using the default SQLite
+  path, on its own, gives you a **test/demo deployment** only — useful for
+  demoing the widget and verifying the deployed code actually runs, not a
+  durable production system. **A paid Render Web Service with
+  `DATABASE_URL` pointed at a managed PostgreSQL database (the currently
+  approved production configuration) is a genuine production deployment**
+  — no separate persistent disk is needed for the database in that case.
 
 ## 1. What This Application Is
 
@@ -111,7 +126,41 @@ Set these in Render's environment variable settings for the service:
 |---|---|---|
 | `ENVIRONMENT` | `production` | Activates the existing startup safety check (`validate_production_config`) that refuses to start with unsafe CORS — see `docs/security.md`. |
 | `CORS_ALLOWED_ORIGINS` | `https://www.brilyx.com` (add `https://brilyx.com` too, comma-separated, only if that apex domain will *also* genuinely embed the widget — do not add origins that aren't confirmed) | Must be the real origin(s) of the page embedding the widget. Never `*`. |
-| `OLLAMA_BASE_URL` | The reachable HTTP(S) URL of your external Ollama instance (e.g. `https://your-ollama-host.example.com`) | See "Ollama" below — this is **not** optional for `/api/chat` to work, though the service will still start and `/health` will still pass without it. |
+| `DATABASE_URL` | The connection string Render (or your Postgres provider) gives you for the database instance, e.g. `postgresql://user:pass@host:5432/dbname` | **Required for real production use** — without it the app falls back to SQLite on the web service's own filesystem, which is not durable storage on Render. A bare `postgres://` scheme is automatically normalized to `postgresql://` — see "Database" below. |
+| **One of** `OLLAMA_BASE_URL`, `AI_PROVIDER`+`GEMINI_API_KEY`, or `AI_PROVIDER`+`GROQ_API_KEY` | Pick one AI provider path (see below) | `/api/chat` needs a working AI provider; `/health` works without any of them. |
+
+**Choose one AI provider path:**
+- **Ollama path** (default, `AI_PROVIDER=ollama`): set `OLLAMA_BASE_URL`
+  to the reachable HTTP(S) URL of your external Ollama instance — see
+  "Ollama" below. This is **not** optional for `/api/chat` to work on this
+  path, though the service will still start and `/health` will still pass
+  without it.
+- **Gemini path** (`AI_PROVIDER=gemini`): set `GEMINI_API_KEY` to a real
+  Google Gemini API key (never committed — set it directly in Render's
+  environment variable UI) and, optionally, `GEMINI_MODEL` if you don't
+  want the default (`gemini-2.0-flash`). This avoids needing any external
+  Ollama hosting at all — see `docs/ai-engine.md`. If `AI_PROVIDER=gemini`
+  is set without a key, the service will still start, but `/api/chat`
+  will return the same controlled `503` it already returns for any AI
+  provider failure.
+- **Groq path** (`AI_PROVIDER=groq`): set `GROQ_API_KEY` to a real Groq
+  API key (never committed — set it directly in Render's environment
+  variable UI). **`GROQ_MODEL` must be set explicitly** —
+  `backend/app/config.py`'s own code-level default is stale (it names a
+  model no longer available on Groq's current catalog for this account).
+  The current, verified production configuration is:
+  ```
+  GROQ_MODEL=openai/gpt-oss-120b
+  GROQ_MAX_TOKENS=800
+  GROQ_EXTRACTION_MODEL=openai/gpt-oss-20b
+  GROQ_EXTRACTION_MAX_TOKENS=1200
+  ```
+  See `docs/ai-engine.md` "Groq tokens-per-minute (TPM) limit" for the
+  full reasoning behind each value. Like the Gemini path, this avoids
+  needing any external Ollama hosting at all. If `AI_PROVIDER=groq` is set
+  without a key, the service will still start, but `/api/chat` will
+  return the same controlled `503` it already returns for any AI provider
+  failure.
 
 ## 5. Optional Environment Variables
 
@@ -120,7 +169,6 @@ want non-default behavior:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./data/brilyx.db` | See "Database" below — override only if using a Render persistent disk at a different mount path. |
 | `OLLAMA_MODEL` | `qwen2.5:3b-instruct-q4_K_M` | Must match a model actually pulled on your external Ollama instance. |
 | `OLLAMA_TIMEOUT_SECONDS` | `60` | Per-request timeout to Ollama. |
 | `CHAT_HISTORY_MAX_MESSAGES` | `20` | Unchanged business behavior. |
@@ -170,28 +218,54 @@ Requirements for that external endpoint:
 **Do not assume Render Free itself can run this model** — it was never
 claimed to, and this document does not claim it does.
 
-## 7. Database / SQLite Persistence Limitation
+## 7. Database
 
-Unchanged SQLite architecture — `data/brilyx.db`, created automatically,
-additive-only schema (see `docs/deployment.md` section 6).
+**Recommended for production: managed PostgreSQL.** Set `DATABASE_URL` to
+your Postgres provider's connection string (Render's own managed
+PostgreSQL, or any other provider reachable from your Render web
+service), e.g.:
 
-**Render Free specifically:** Render's free web services generally do not
-provide a persistent disk — the filesystem a free service's container
-runs on is not guaranteed to survive a redeploy, restart, or the service
-being spun down/back up. **NEEDS MANUAL VERIFICATION** against Render's
-current free-tier documentation for the exact current behavior, but the
-safe assumption for this deployment is:
+```
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+```
+
+- No code change is required to support this: the entire data layer
+  (`backend/app/models.py` and every query in `backend/app/services/`,
+  `qualification/`, `leads/`, `events/`) uses only portable SQLAlchemy ORM
+  constructs — no raw SQL, no SQLite-only types or syntax.
+- A bare `postgres://` scheme (some providers, historically including
+  Render, issue URLs this way) is automatically rewritten to
+  `postgresql://` by `backend/app/database.py::normalize_database_url()`
+  — SQLAlchemy 2.x's Postgres dialect does not recognize `postgres://` on
+  its own. Either scheme works as `DATABASE_URL`.
+- The engine is created with `pool_pre_ping=True` and `pool_recycle=300`
+  on the Postgres path (not applied to SQLite), so a managed provider
+  silently closing idle connections doesn't surface as request failures.
+- Tables are still created via `Base.metadata.create_all()` on startup —
+  additive only, never drops or alters existing tables. This is
+  intentionally **not** using Alembic or any other migration tool yet:
+  for the initial cutover onto a fresh Postgres database this is
+  sufficient and is the smallest safe approach. Introduce a real
+  migration tool at the point the schema needs to change *after*
+  Postgres already holds real production data — `create_all()` alone is
+  not safe for altering an existing column/table at that point.
+- With state living in managed Postgres, a **paid Render Web Service no
+  longer needs a persistent disk for the database** — this is what makes
+  a paid Render Web Service + managed Postgres a genuine production
+  deployment rather than a test/demo (see "Before You Start" above).
+
+**SQLite remains fully supported** (local development, or a quick Render
+Free test/demo) — `data/brilyx.db`, created automatically, additive-only
+schema (see `docs/deployment.md` section 6). On Render Free specifically,
+the container filesystem is not guaranteed to survive a redeploy/restart
+(**NEEDS MANUAL VERIFICATION** against Render's current free-tier
+behavior), so:
 
 > **Every conversation, lead, and business event stored in SQLite on
 > Render Free may be lost at any redeploy or restart.** Do not treat data
-> in this deployment as durable. This is exactly why this deployment is a
-> test/demo, not production.
-
-If Render offers a persistent disk add-on (typically a paid feature) and
-you attach one, set `DATABASE_URL` to a `sqlite:////<mount-path>/brilyx.db`
-pointing at that disk's mount path — the application does not need any
-code change to support this (verified: `DATABASE_URL` is fully
-env-overridable).
+> in a SQLite-on-Render-Free deployment as durable — use PostgreSQL (or a
+> paid persistent disk, `sqlite:////<mount-path>/brilyx.db`) for anything
+> that needs to survive a restart.
 
 ## 8. CORS
 
@@ -307,15 +381,15 @@ later step):
 
 ## 15. Summary: Is This Production?
 
-**No.** This Render Free deployment is a **test/demo deployment** of the
-real, unmodified application. It becomes something closer to production
-only if:
+**Depends on the configuration chosen:**
 
-1. A durable, persistent database location is provided (a paid Render
-   disk, or moving to your friend's Brilyx hosting), **and**
-2. A reliably-available external Ollama endpoint is provisioned and
-   secured, **and**
-3. `CORS_ALLOWED_ORIGINS` is pointed at the real production domain(s).
-
-Until then, treat anything stored during a Render Free test deployment as
-disposable.
+- A **Render Free** web service using the default SQLite path is a
+  **test/demo deployment** only — treat anything stored there as
+  disposable.
+- A **paid Render Web Service** with `DATABASE_URL` pointed at a managed
+  **PostgreSQL** database, `AI_PROVIDER=groq` configured with the current
+  production values (see `docs/ai-engine.md`), and `CORS_ALLOWED_ORIGINS`
+  pointed at the real production domain(s) — **the currently approved
+  configuration** — is a genuine production deployment. Data durability no
+  longer depends on the web service's own container filesystem at all
+  once Postgres is in place.

@@ -10,10 +10,71 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DATABASE_URL: str = "sqlite:///./data/brilyx.db"
 
+    # "ollama" (local, free, default), "gemini", or "groq" (both cloud,
+    # for production — see backend/app/ai/{gemini,groq}.py and
+    # docs/ai-engine.md). Switching this never changes business logic:
+    # pricing, qualification, lead capture, and every deterministic rule
+    # live entirely outside the AI provider layer regardless of which one
+    # is selected.
     AI_PROVIDER: str = "ollama"
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen2.5:3b-instruct-q4_K_M"
     OLLAMA_TIMEOUT_SECONDS: float = 60
+
+    # Gemini (Google GenAI SDK). GEMINI_API_KEY is only required when
+    # AI_PROVIDER=gemini is actually selected — left blank, Ollama keeps
+    # working exactly as before. Never hard-code a real key here or
+    # anywhere else; it must come from the environment.
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_TIMEOUT_SECONDS: float = 60
+
+    # Groq (official `groq` SDK — OpenAI-compatible chat completions API).
+    # GROQ_API_KEY is only required when AI_PROVIDER=groq is selected.
+    # Default model chosen after inspecting the models actually offered by
+    # the installed SDK version (see backend/app/ai/groq.py for the full
+    # reasoning) — a general-purpose instruction-following model
+    # appropriate for a business chatbot, not one of Groq's agentic
+    # "compound" models (which can autonomously browse/use tools — not
+    # appropriate here, where all facts must come only from the approved
+    # Brilyx knowledge base) and not a moderation-only model.
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_TIMEOUT_SECONDS: float = 60
+
+    # Caps the main chat reply's output length. Without this, Groq reserves
+    # a large default output budget against its tokens-per-minute limit for
+    # every request (observed in production: a single normal chat request
+    # was rejected with HTTP 413 "tokens per minute" even though the actual
+    # prompt was well under the limit) — capping max_tokens fixed this
+    # without any change to prompt size or model. 800 was chosen after a
+    # live stress test across realistic Brilyx conversations at 500/600/
+    # 700/800: 500 truncated common scenarios (including lead capture);
+    # 600-700 still truncated some detailed/consultative replies; 800
+    # reliably completed every common business scenario while still
+    # leaving ~1,650 tokens of headroom under the 8,000 TPM ceiling.
+    GROQ_MAX_TOKENS: int = 800
+
+    # Structured lead-extraction (backend/app/intelligence/extractor.py) is
+    # a narrow, low-stakes task — its output is Pydantic-validated and
+    # silently discarded on any failure (falling back to deterministic
+    # rules), so a smaller/cheaper/faster model is appropriate here. Using a
+    # different model than GROQ_MODEL also matters for the TPM fix above:
+    # Groq enforces tokens-per-minute per model, so routing extraction
+    # through its own model keeps it from competing with the main chat
+    # call's budget.
+    GROQ_EXTRACTION_MODEL: str = "openai/gpt-oss-20b"
+    # The extraction JSON schema itself (backend/app/intelligence/models.py)
+    # is tiny — a handful of enum/short-string fields, a requirements array
+    # capped at 5 items, and a confidence float. But GROQ_EXTRACTION_MODEL
+    # is a *reasoning* model: Groq counts its hidden reasoning tokens
+    # against max_tokens before any visible output is produced. Measured
+    # live against this exact model: 130-850+ reasoning tokens depending on
+    # message complexity, so a cap sized only for the visible JSON (e.g.
+    # ~300) truncates before any content is emitted, silently returning an
+    # empty response every time. 1200 was verified live across simple,
+    # complex, and minimal messages to reliably leave room for both.
+    GROQ_EXTRACTION_MAX_TOKENS: int = 1200
 
     CHAT_HISTORY_MAX_MESSAGES: int = 20
     CHAT_MAX_MESSAGE_LENGTH: int = 4000
