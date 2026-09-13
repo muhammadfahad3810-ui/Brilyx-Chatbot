@@ -80,6 +80,12 @@ and **`docs/security.md`** respectively. `docs/security.md` in particular
 covers the threat model, rate limiting, conversation access control, CORS,
 and known limitations for anyone deploying this publicly.
 
+Phase 10 prepares (but does not perform) deployment: `docs/deployment.md`
+is a general hosting handoff guide, and **`docs/deployment-render.md`**
+is a step-by-step manual guide specifically for a Render Free test/demo
+deployment — including why Render Free cannot host Ollama itself and why
+SQLite on Render Free is not durable storage.
+
 ## Requirements
 
 - **Python 3.11**

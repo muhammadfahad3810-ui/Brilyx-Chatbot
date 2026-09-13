@@ -13,6 +13,8 @@ dist/
 
 # Database
 data/*.db
+data/*.sqlite
+data/*.sqlite3
 
 # Logs
 *.log
