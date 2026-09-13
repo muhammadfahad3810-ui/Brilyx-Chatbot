@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Brilyx — Widget Embedding Demo (local dev)</title>
+<style>
+  /*
+    Deliberately hostile global host-page CSS, on purpose: this page exists
+    to prove the widget survives being dropped into a real, messy site
+    without a CSS reset. If the widget's launcher/panel/buttons/inputs
+    still look correct despite these global rules, Shadow DOM isolation
+    (docs/frontend-widget.md, "Host Page Isolation") is working.
+  */
+  * { box-sizing: content-box; }
+  body { font-family: Georgia, serif; margin: 0; background: #fefce8; color: #333; }
+  button { background: red; color: yellow; border: 5px dashed lime; font-size: 30px; padding: 20px; }
+  input, textarea { border: 10px solid purple; font-size: 40px; }
+  div { border: 1px solid magenta; }
+  a { color: orange; text-decoration: blink; }
+
+  .page-wrap { max-width: 760px; margin: 0 auto; padding: 40px 24px 120px; }
+  .page-wrap h1 { font-size: 28px; }
+  .page-wrap p { line-height: 1.6; }
+  .config-box { background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 24px; }
+  .config-box code { background: #f1f1f1; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <div class="page-wrap">
+    <h1>Brilyx.com (local embedding demo)</h1>
+    <p>
+      This page stands in for the real www.brilyx.com marketing site during local development.
+      It intentionally styles every <code>button</code>, <code>input</code>, <code>textarea</code>,
+      and <code>div</code> on the page with ugly, aggressive rules so that if the chat widget in the
+      bottom-right corner still renders cleanly, we know its Shadow DOM boundary is doing its job.
+    </p>
+    <div class="config-box">
+      <p><strong>Backend must be running</strong> at the URL below (see docs/frontend-widget.md for
+      how to start it) and its CORS_ALLOWED_ORIGINS must include the origin this page is served
+      from.</p>
+      <p>Edit the <code>data-api-base-url</code> attribute on the <code>&lt;script&gt;</code> tag at
+      the bottom of this file to point at your backend if it isn't on the default
+      <code>http://127.0.0.1:8000</code>.</p>
+    </div>
+  </div>
+
+  <script
+    src="./brilyx-chatbot.js"
+    data-api-base-url="http://127.0.0.1:8000"
+    data-title="Brilyx AI"
+    data-subtitle="AI & Automation Assistant"
+    data-dev-mode="true"
+  ></script>
+</body>
+</html>
