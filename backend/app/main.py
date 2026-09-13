@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.app import database
 from backend.app.config import settings, validate_production_config
@@ -13,7 +14,27 @@ from backend.app.security_headers import MaxBodySizeMiddleware, SecurityHeadersM
 # time: an unsafe production deployment should not start.
 validate_production_config(settings)
 
-app = FastAPI(title=settings.APP_NAME)
+
+class UTF8JSONResponse(JSONResponse):
+    """JSONResponse with an explicit charset in its Content-Type header.
+
+    The response body was always correctly encoded UTF-8 (Starlette's
+    JSONResponse always encodes to UTF-8) — this changes only the
+    declared `Content-Type` header from `application/json` to
+    `application/json; charset=utf-8`. Some HTTP clients (notably Windows
+    PowerShell 5.1's `Invoke-RestMethod`) do not assume UTF-8 when no
+    charset is declared and silently misdecode multi-byte characters
+    (em dashes, curly quotes) into mojibake — verified by reproducing the
+    exact symptom with `Invoke-RestMethod` against this API, and
+    confirming an explicit charset resolves it. RFC 8259 doesn't require
+    this (JSON is UTF-8 by default), but declaring it explicitly is
+    harmless and standard practice for compatibility with such clients.
+    """
+
+    media_type = "application/json; charset=utf-8"
+
+
+app = FastAPI(title=settings.APP_NAME, default_response_class=UTF8JSONResponse)
 
 database.init_db()
 
