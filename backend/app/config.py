@@ -109,6 +109,13 @@ class Settings(BaseSettings):
     # notifications are HIGH-VALUE LEAD, DEMO REQUEST, and HUMAN HANDOFF.
     NOTIFY_ON_LEAD_CREATED: bool = False
 
+    # Temporary, opt-in diagnostic (see backend/app/diagnostics_smtp_tcp.py):
+    # tests only whether a bare TCP connection to SMTP_HOST:SMTP_PORT
+    # succeeds — no TLS, no login, no email. Off by default so it changes
+    # nothing unless explicitly enabled; intended to be removed once the
+    # Render SMTP connectivity question it was added to answer is resolved.
+    SMTP_TCP_DIAGNOSTIC_ENABLED: bool = False
+
     @property
     def notifications_configured(self) -> bool:
         return bool(self.SMTP_HOST and self.OWNER_NOTIFICATION_EMAIL)

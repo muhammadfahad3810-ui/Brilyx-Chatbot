@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 
 from backend.app import database
 from backend.app.config import settings, validate_production_config
+from backend.app.diagnostics_smtp_tcp import run_smtp_tcp_diagnostic
 from backend.app.routers import chat, conversations, health
 from backend.app.security_headers import MaxBodySizeMiddleware, SecurityHeadersMiddleware
 
@@ -37,6 +38,10 @@ class UTF8JSONResponse(JSONResponse):
 app = FastAPI(title=settings.APP_NAME, default_response_class=UTF8JSONResponse)
 
 database.init_db()
+
+# Temporary, opt-in diagnostic (see backend/app/diagnostics_smtp_tcp.py) —
+# no-op unless SMTP_TCP_DIAGNOSTIC_ENABLED=true is explicitly set.
+run_smtp_tcp_diagnostic()
 
 # Phase 9: applied in reverse order of intent (Starlette wraps middleware
 # in the order added, outermost added = outermost executed) — body-size
