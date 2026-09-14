@@ -1,9 +1,19 @@
 import pytest
 
-from backend.app.config import settings
+from backend.app.config import Settings, settings
 from backend.app.events.models import EventStatus, EventType
-from backend.app.events.notifications import NotificationError, NotificationProvider, NotificationService
-from backend.app.events.service import evaluate_and_persist_events
+from backend.app.events.notifications import (
+    NotificationError,
+    NotificationProvider,
+    NotificationService,
+    ResendNotificationProvider,
+    SMTPNotificationProvider,
+)
+from backend.app.events.service import (
+    build_notification_provider,
+    build_notification_status_context_lines,
+    evaluate_and_persist_events,
+)
 from backend.app.models import BusinessEvent, Conversation, ConversationState, Lead, LeadQualification
 
 
@@ -316,3 +326,139 @@ def test_lead_created_is_notified_when_explicitly_enabled(db_session, monkeypatc
     lead_created_event = next(e for e in created if e.event_type == EventType.LEAD_CREATED.value)
     assert lead_created_event.status == EventStatus.COMPLETED.value
     assert len(fake_provider.sent) == 1
+
+
+# ---------------------------------------------------------------------------
+# Provider selection: Resend preferred over SMTP; graceful when neither is
+# configured (requirement 7 / requirement 11 "NotificationService selects
+# Resend when configured" + "existing unconfigured behavior remains safe")
+# ---------------------------------------------------------------------------
+
+
+def _settings(**overrides):
+    defaults = dict(
+        SMTP_HOST="",
+        SMTP_PORT=587,
+        SMTP_USERNAME="",
+        SMTP_PASSWORD="",
+        SMTP_FROM_EMAIL="",
+        SMTP_USE_TLS=True,
+        OWNER_NOTIFICATION_EMAIL="",
+        RESEND_API_KEY="",
+        RESEND_FROM_EMAIL="",
+    )
+    defaults.update(overrides)
+    return Settings(_env_file=None, **defaults)
+
+
+def test_build_notification_provider_selects_resend_when_fully_configured():
+    config = _settings(
+        RESEND_API_KEY="re_secret_key",
+        RESEND_FROM_EMAIL="notifications@brilyx.com",
+        OWNER_NOTIFICATION_EMAIL="brilyx.0@gmail.com",
+        # SMTP also fully configured, to prove Resend wins, not just "is present".
+        SMTP_HOST="smtp.gmail.com",
+        SMTP_USERNAME="brilyx.0@gmail.com",
+        SMTP_PASSWORD="app-password",
+    )
+
+    provider = build_notification_provider(config)
+
+    assert isinstance(provider, ResendNotificationProvider)
+    assert not isinstance(provider, SMTPNotificationProvider)
+
+
+def test_build_notification_provider_falls_back_to_smtp_when_resend_not_configured():
+    config = _settings(
+        SMTP_HOST="smtp.gmail.com",
+        SMTP_USERNAME="brilyx.0@gmail.com",
+        SMTP_PASSWORD="app-password",
+        OWNER_NOTIFICATION_EMAIL="brilyx.0@gmail.com",
+    )
+
+    provider = build_notification_provider(config)
+
+    assert isinstance(provider, SMTPNotificationProvider)
+
+
+def test_build_notification_provider_returns_none_when_neither_is_configured():
+    config = _settings()
+
+    provider = build_notification_provider(config)
+
+    assert provider is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        dict(RESEND_API_KEY="key_only"),
+        dict(RESEND_API_KEY="key", RESEND_FROM_EMAIL="from@brilyx.com"),  # missing OWNER_NOTIFICATION_EMAIL
+        dict(RESEND_FROM_EMAIL="from@brilyx.com", OWNER_NOTIFICATION_EMAIL="owner@brilyx.com"),  # missing key
+    ],
+)
+def test_build_notification_provider_does_not_use_resend_when_partially_configured(overrides):
+    config = _settings(**overrides)
+
+    provider = build_notification_provider(config)
+
+    assert not isinstance(provider, ResendNotificationProvider)
+
+
+# ---------------------------------------------------------------------------
+# build_notification_status_context_lines — grounds the AI's reply in the
+# real notification outcome (requirement 9 / chatbot truthfulness)
+# ---------------------------------------------------------------------------
+
+
+def test_notification_status_context_confirms_only_after_completed_demo_notification(db_session):
+    conversation, state = _make_conversation(db_session, demo_requested=True)
+    qualification = _make_qualification(db_session, conversation)
+    notification_service = NotificationService(FakeProvider())  # succeeds
+
+    evaluate_and_persist_events(db_session, conversation, state, qualification, None, notification_service)
+
+    lines = build_notification_status_context_lines(db_session, conversation)
+
+    assert any("CONFIRMED" in line and "notified" in line for line in lines)
+    assert not any("has NOT confirmed" in line for line in lines)
+
+
+def test_notification_status_context_never_confirms_after_failed_demo_notification(db_session):
+    conversation, state = _make_conversation(db_session, demo_requested=True)
+    qualification = _make_qualification(db_session, conversation)
+    notification_service = NotificationService(FakeProvider(should_fail=True))
+
+    evaluate_and_persist_events(db_session, conversation, state, qualification, None, notification_service)
+
+    lines = build_notification_status_context_lines(db_session, conversation)
+
+    assert any("has NOT confirmed" in line for line in lines)
+    assert not any("CONFIRMED" in line for line in lines)
+
+
+def test_notification_status_context_never_confirms_when_unconfigured(db_session):
+    conversation, state = _make_conversation(db_session, demo_requested=True)
+    qualification = _make_qualification(db_session, conversation)
+    notification_service = NotificationService(provider=None)
+
+    evaluate_and_persist_events(db_session, conversation, state, qualification, None, notification_service)
+
+    lines = build_notification_status_context_lines(db_session, conversation)
+
+    assert any("has NOT confirmed" in line for line in lines)
+    assert not any("CONFIRMED" in line for line in lines)
+
+
+def test_notification_status_context_empty_when_no_demo_or_handoff(db_session):
+    conversation, state = _make_conversation(db_session)
+    qualification = _make_qualification(db_session, conversation)
+    lead = _make_lead(db_session, conversation)
+    notification_service = NotificationService(FakeProvider())
+
+    # lead_created/high_value_lead may fire, but neither is visitor-facing.
+    evaluate_and_persist_events(db_session, conversation, state, qualification, lead, notification_service)
+
+    lines = build_notification_status_context_lines(db_session, conversation)
+
+    assert lines == []

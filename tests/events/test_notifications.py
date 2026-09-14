@@ -2,10 +2,17 @@ import smtplib
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
+from backend.app.events import notifications as notifications_module
 from backend.app.events.models import EventType
-from backend.app.events.notifications import NotificationError, SMTPNotificationProvider, render_event_email
+from backend.app.events.notifications import (
+    NotificationError,
+    ResendNotificationProvider,
+    SMTPNotificationProvider,
+    render_event_email,
+)
 
 
 def _provider(**overrides):
@@ -129,3 +136,120 @@ def test_render_event_email_subject_is_fixed_regardless_of_visitor_content():
     assert "\r" not in subject
     assert "\n" not in subject
     assert subject == "High-Value Lead — Brilyx"
+
+
+# ---------------------------------------------------------------------------
+# Resend provider (HTTPS API) — mirrors the OllamaProvider test style
+# (monkeypatch notifications_module.httpx.post), since ResendNotificationProvider
+# calls httpx.post the same way.
+# ---------------------------------------------------------------------------
+
+
+class FakeHTTPResponse:
+    def __init__(self, status_code=200, text="{}"):
+        self.status_code = status_code
+        self.text = text
+
+
+def _resend_provider(**overrides):
+    defaults = dict(
+        api_key="re_super_secret_key_123",
+        from_email="notifications@brilyx.com",
+        to_email="brilyx.0@gmail.com",
+    )
+    defaults.update(overrides)
+    return ResendNotificationProvider(**defaults)
+
+
+def test_resend_successful_send_posts_expected_request(monkeypatch):
+    provider = _resend_provider()
+    captured = {}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeHTTPResponse(status_code=200)
+
+    monkeypatch.setattr(notifications_module.httpx, "post", fake_post)
+
+    provider.send("Demo Requested — Brilyx", "A visitor requested a demo.")
+
+    assert captured["url"] == "https://api.resend.com/emails"
+    assert captured["headers"]["Authorization"] == "Bearer re_super_secret_key_123"
+    assert captured["json"]["from"] == "notifications@brilyx.com"
+    assert captured["json"]["to"] == ["brilyx.0@gmail.com"]
+    assert captured["json"]["subject"] == "Demo Requested — Brilyx"
+    assert captured["json"]["text"] == "A visitor requested a demo."
+
+
+def test_resend_only_reports_success_after_a_2xx_status(monkeypatch):
+    # 200 and 201 are both used by Resend's API for a successful send —
+    # neither should raise.
+    for status_code in (200, 201):
+        provider = _resend_provider()
+        monkeypatch.setattr(
+            notifications_module.httpx, "post", lambda *a, **k: FakeHTTPResponse(status_code=status_code)
+        )
+        provider.send("subject", "body")  # must not raise
+
+
+def test_resend_non_2xx_status_raises_notification_error(monkeypatch):
+    provider = _resend_provider()
+    monkeypatch.setattr(
+        notifications_module.httpx,
+        "post",
+        lambda *a, **k: FakeHTTPResponse(status_code=422, text='{"message": "Invalid `from` field"}'),
+    )
+
+    with pytest.raises(NotificationError) as exc_info:
+        provider.send("subject", "body")
+
+    assert "422" in str(exc_info.value)
+
+
+def test_resend_transport_error_raises_notification_error(monkeypatch):
+    provider = _resend_provider()
+
+    def fake_post(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(notifications_module.httpx, "post", fake_post)
+
+    with pytest.raises(NotificationError):
+        provider.send("subject", "body")
+
+
+def test_resend_api_key_never_appears_in_notification_error_on_failure(monkeypatch):
+    secret_key = "re_super_secret_key_123"
+    provider = _resend_provider(api_key=secret_key)
+    monkeypatch.setattr(
+        notifications_module.httpx,
+        "post",
+        lambda *a, **k: FakeHTTPResponse(status_code=401, text=f'{{"message": "Invalid API key {secret_key}"}}'),
+    )
+
+    with pytest.raises(NotificationError) as exc_info:
+        provider.send("subject", "body")
+
+    # The provider's own message only ever names the status code — it
+    # never reads response.text, so even a response body that happened to
+    # echo the key back (contrived here) can never reach the exception,
+    # a stored BusinessEvent.error_message, or a log line.
+    assert secret_key not in str(exc_info.value)
+
+
+def test_resend_api_key_never_appears_in_transport_error_message(monkeypatch):
+    secret_key = "re_super_secret_key_123"
+    provider = _resend_provider(api_key=secret_key)
+
+    def fake_post(*args, **kwargs):
+        raise httpx.ConnectError(f"connection refused for key Bearer {secret_key}")
+
+    monkeypatch.setattr(notifications_module.httpx, "post", fake_post)
+
+    with pytest.raises(NotificationError) as exc_info:
+        provider.send("subject", "body")
+
+    assert secret_key not in str(exc_info.value)

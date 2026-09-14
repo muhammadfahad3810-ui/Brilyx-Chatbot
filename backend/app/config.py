@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     SMTP_USE_TLS: bool = True
     OWNER_NOTIFICATION_EMAIL: str = ""
 
+    # Resend (HTTPS API, not SMTP) — added because Render's outbound
+    # network cannot reach smtp.gmail.com:587 (see
+    # backend/app/diagnostics_smtp_tcp.py / the Render SMTP connectivity
+    # investigation this followed). Preferred over SMTP whenever configured
+    # — see events/service.py::build_notification_provider(). Never
+    # hard-code a real key here; set it via the environment only.
+    RESEND_API_KEY: str = ""
+    RESEND_FROM_EMAIL: str = ""
+
     # Off by default (Phase 8 spec section 16): every lead creation would
     # otherwise notify the owner, which is noisy — the important
     # notifications are HIGH-VALUE LEAD, DEMO REQUEST, and HUMAN HANDOFF.
@@ -119,6 +128,10 @@ class Settings(BaseSettings):
     @property
     def notifications_configured(self) -> bool:
         return bool(self.SMTP_HOST and self.OWNER_NOTIFICATION_EMAIL)
+
+    @property
+    def resend_configured(self) -> bool:
+        return bool(self.RESEND_API_KEY and self.RESEND_FROM_EMAIL and self.OWNER_NOTIFICATION_EMAIL)
 
     # Phase 9: lightweight, single-process, in-memory rate limits (see
     # backend/app/rate_limit.py for the mechanism and its documented

@@ -19,6 +19,34 @@ class RecordingFakeOrchestrator:
         return AIResponse(text=self._extraction_json, provider="fake", model="fake")
 
 
+class ContextAwareFakeOrchestrator:
+    """Simulates a model that honestly grounds its reply in the backend-supplied
+    CONVERSATION CONTEXT block, instead of returning a fixed canned string like
+    RecordingFakeOrchestrator above.
+
+    A real LLM's wording can't be asserted on deterministically, so this is
+    the practical way to test the actual, testable contract: whether the
+    context the backend hands to the AI accurately reflects the real
+    notification outcome (see events.service.build_notification_status_context_lines).
+    A model that (like this fake) actually follows BRILYX_CORE_PROMPT's
+    "never claim the team was notified unless the backend confirms it" rule
+    can only ever produce a truthful reply if fed a truthful context — this
+    proves the context itself never lies, which is the one thing the
+    backend controls.
+    """
+
+    def chat(self, message, history=None, context=None):
+        context = context or ""
+        if "CONFIRMED" in context and "notified" in context:
+            text = "Great news — the Brilyx team has been notified by email about your demo request."
+        else:
+            text = "Thanks! I've saved your demo request, but I'm not able to confirm the Brilyx team has seen it yet."
+        return AIResponse(text=text, provider="fake", model="fake")
+
+    def extract(self, system_prompt, message):
+        return AIResponse(text="{}", provider="fake", model="fake")
+
+
 class FakeProvider(NotificationProvider):
     def __init__(self, should_fail: bool = False):
         self.should_fail = should_fail
@@ -184,6 +212,40 @@ def test_chat_response_never_exposes_event_or_smtp_details(client):
 # ---------------------------------------------------------------------------
 # O-Q: Phase 5/6/4.1.1 regressions spot-checked alongside the events layer
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Chatbot truthfulness (requirement 9): the response must never claim the
+# team was notified unless the notification actually succeeded.
+# ---------------------------------------------------------------------------
+
+
+def test_demo_response_cannot_claim_notification_when_it_fails(client):
+    _override_orchestrator(ContextAwareFakeOrchestrator())
+    _override_notifications(FakeProvider(should_fail=True))
+
+    _, body = _send(client, None, "I'd like a demo please.")
+
+    assert "notified" not in body["response"].lower()
+    assert "not able to confirm" in body["response"].lower()
+
+
+def test_demo_response_can_claim_notification_only_when_it_succeeds(client):
+    _override_orchestrator(ContextAwareFakeOrchestrator())
+    _override_notifications(FakeProvider())  # succeeds
+
+    _, body = _send(client, None, "I'd like a demo please.")
+
+    assert "notified" in body["response"].lower()
+
+
+def test_demo_response_cannot_claim_notification_when_unconfigured(client):
+    _override_orchestrator(ContextAwareFakeOrchestrator())
+    _override_notifications(None)
+
+    _, body = _send(client, None, "I'd like a demo please.")
+
+    assert "notified" not in body["response"].lower()
 
 
 def test_qualification_and_lead_capture_unaffected_by_events_layer(client, db_session):

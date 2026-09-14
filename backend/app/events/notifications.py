@@ -2,9 +2,12 @@ import smtplib
 from abc import ABC, abstractmethod
 from email.message import EmailMessage
 
+import httpx
+
 from backend.app.events.models import EventType
 
 REQUEST_TIMEOUT_SECONDS = 10
+RESEND_API_URL = "https://api.resend.com/emails"
 
 
 class NotificationError(Exception):
@@ -80,6 +83,57 @@ class SMTPNotificationProvider(NotificationProvider):
             raise NotificationError("SMTP authentication failed") from exc
         except (smtplib.SMTPException, OSError, TimeoutError) as exc:
             raise NotificationError(f"SMTP delivery failed ({exc.__class__.__name__})") from exc
+
+
+class ResendNotificationProvider(NotificationProvider):
+    """Resend HTTPS API transport (https://resend.com), used in place of SMTP.
+
+    Added because Render's outbound network cannot reach
+    smtp.gmail.com:587 (see the SMTP connectivity diagnostic in
+    backend/app/diagnostics_smtp_tcp.py) — Resend's plain HTTPS POST
+    avoids raw SMTP sockets entirely, so it works from any host that can
+    make a normal outbound HTTPS request. Uses the project's existing
+    `httpx` dependency; no new package required.
+
+    `api_key` is used only as the request's `Authorization` header value —
+    it is never interpolated into a `NotificationError` message, a log
+    line, or the request body, so it cannot leak into `BusinessEvent.
+    error_message` (persisted to the database) or any API response.
+    """
+
+    def __init__(self, api_key: str, from_email: str, to_email: str, timeout_seconds: float = REQUEST_TIMEOUT_SECONDS):
+        self._api_key = api_key
+        self._from_email = from_email
+        self._to_email = to_email
+        self._timeout_seconds = timeout_seconds
+
+    def send(self, subject: str, body: str) -> None:
+        try:
+            response = httpx.post(
+                RESEND_API_URL,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json={
+                    "from": self._from_email,
+                    "to": [self._to_email],
+                    "subject": subject,
+                    "text": body,
+                },
+                timeout=self._timeout_seconds,
+            )
+        except httpx.HTTPError as exc:
+            # Never include str(exc): httpx exceptions can echo back
+            # request details (headers/URL) — category-only, mirroring
+            # SMTPNotificationProvider.send()'s own pattern above.
+            raise NotificationError(f"Resend request failed ({exc.__class__.__name__})") from exc
+
+        if response.status_code >= 400:
+            # Never include response.text: Resend's error body could echo
+            # back request fields; the status code alone is enough to
+            # diagnose and is never sensitive. This is the only place
+            # "success" is decided — a non-2xx response always raises, so
+            # the caller can only ever treat this as delivered once Resend
+            # itself has confirmed the request with a 2xx status.
+            raise NotificationError(f"Resend API request failed (status {response.status_code})")
 
 
 # ---------------------------------------------------------------------------

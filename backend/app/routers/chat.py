@@ -11,7 +11,11 @@ from backend.app.config import settings
 from backend.app.database import get_db
 from backend.app.rate_limit import InMemoryRateLimiter
 from backend.app.events.notifications import NotificationService
-from backend.app.events.service import evaluate_and_persist_events, get_notification_service
+from backend.app.events.service import (
+    build_notification_status_context_lines,
+    evaluate_and_persist_events,
+    get_notification_service,
+)
 from backend.app.intelligence.service import build_context_lines, run_intelligence
 from backend.app.leads.service import run_lead_capture
 from backend.app.qualification.service import run_qualification
@@ -122,7 +126,6 @@ def chat(
     # backend/app/intelligence/service.py).
     try:
         state = run_intelligence(db, conversation, request.message, orchestrator)
-        context = build_context_section(build_context_lines(state))
         # Deterministic lead-qualification scoring (Phase 5): recomputed and
         # cached from the state just persisted above. Internal business
         # intelligence only — never included in the response returned below.
@@ -137,6 +140,13 @@ def chat(
         # A notification failure here is recorded on the event row and
         # never propagates; only a genuine database failure would.
         evaluate_and_persist_events(db, conversation, state, qualification, lead, notification_service)
+        # Context is built only *after* the notification attempt above, so
+        # the AI is grounded in the real, just-recorded outcome rather than
+        # a guess made before the backend knew whether it succeeded — see
+        # events.service.build_notification_status_context_lines and
+        # BRILYX_CORE_PROMPT's "never claim the team was notified" rule.
+        context_lines = build_context_lines(state) + build_notification_status_context_lines(db, conversation)
+        context = build_context_section(context_lines)
     except SQLAlchemyError:
         raise HTTPException(status_code=500, detail=SERVER_ERROR_MESSAGE)
 

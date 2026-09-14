@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import Settings, settings
 from backend.app.events.models import EventStatus, EventType
-from backend.app.events.notifications import NotificationError, NotificationService, SMTPNotificationProvider
+from backend.app.events.notifications import (
+    NotificationError,
+    NotificationProvider,
+    NotificationService,
+    ResendNotificationProvider,
+    SMTPNotificationProvider,
+)
 from backend.app.events.rules import evaluate_events
 from backend.app.models import BusinessEvent, Conversation, ConversationState, Lead, LeadQualification
 
@@ -26,13 +32,25 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def build_notification_provider(config: Settings = settings) -> SMTPNotificationProvider | None:
-    """Construct the configured SMTP provider, or None if not fully configured.
+def build_notification_provider(config: Settings = settings) -> NotificationProvider | None:
+    """Construct the configured notification provider, or None if neither is configured.
 
-    Deliberately returns None rather than raising: missing/partial SMTP
+    Resend (HTTPS API) is preferred whenever it's configured — SMTP is
+    never even attempted in that case, since Render's outbound network
+    cannot reach smtp.gmail.com:587 (see the SMTP connectivity diagnostic
+    and docs/business-actions.md). Falls back to the pre-existing SMTP
+    provider only when Resend isn't configured, so any deployment still
+    relying on SMTP keeps working unchanged. Deliberately returns None
+    rather than raising when neither is configured: missing/partial
     configuration must never prevent the application from starting or the
     chat endpoint from working (Phase 8 spec section 37).
     """
+    if config.resend_configured:
+        return ResendNotificationProvider(
+            api_key=config.RESEND_API_KEY,
+            from_email=config.RESEND_FROM_EMAIL,
+            to_email=config.OWNER_NOTIFICATION_EMAIL,
+        )
     if not config.notifications_configured:
         return None
     return SMTPNotificationProvider(
@@ -170,3 +188,54 @@ def evaluate_and_persist_events(
         _attempt_notification(db, event, notification_service)
 
     return created
+
+
+# Visitor-facing event types — the only ones ever phrased to the visitor
+# via chat context. lead_created/high_value_lead are internal-only signals
+# and never described to the visitor either way.
+_VISITOR_FACING_EVENT_LABELS = {
+    EventType.DEMO_REQUESTED.value: "demo request",
+    EventType.HUMAN_HANDOFF_REQUESTED.value: "request to speak with a human",
+}
+
+
+def build_notification_status_context_lines(db: Session, conversation: Conversation) -> list[str]:
+    """Ground the AI's reply in the *actual*, current notification outcome.
+
+    Must be called after `evaluate_and_persist_events()` in the same
+    request, so this turn's own notification attempt (if any) is already
+    reflected in `business_events`. Queried fresh from the database — not
+    just from events created this turn — so a later message in the same
+    conversation ("did you tell them?") still reflects the true status
+    even on a turn that created no new event.
+
+    This exists because `BRILYX_CORE_PROMPT`'s rule ("Never claim the
+    Brilyx team was notified unless the backend actually confirms it") has
+    nothing to check itself against without this: the model has no other
+    way to know whether the owner notification actually succeeded. One
+    line per visitor-facing event type actually present for this
+    conversation; conversations with neither a demo nor a handoff request
+    get an empty list (i.e. no context change at all).
+    """
+    if not conversation.id:
+        return []
+    rows = (
+        db.query(BusinessEvent)
+        .filter(
+            BusinessEvent.conversation_id == conversation.id,
+            BusinessEvent.event_type.in_(list(_VISITOR_FACING_EVENT_LABELS)),
+        )
+        .all()
+    )
+    lines: list[str] = []
+    for row in rows:
+        label = _VISITOR_FACING_EVENT_LABELS[row.event_type]
+        if row.status == EventStatus.COMPLETED.value:
+            lines.append(f"Backend CONFIRMED: the Brilyx team has been notified by email about this {label}.")
+        else:
+            lines.append(
+                f"Backend has NOT confirmed the Brilyx team was notified about this {label} — "
+                "do not tell the visitor the team has been notified or will be contacted; "
+                "say only that the request has been recorded."
+            )
+    return lines

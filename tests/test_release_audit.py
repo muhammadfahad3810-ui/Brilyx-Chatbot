@@ -55,7 +55,10 @@ def test_gitignore_does_not_exclude_required_project_content():
 
 
 def test_env_example_has_no_populated_secret_values():
-    secret_keys = {"SMTP_USERNAME", "SMTP_PASSWORD", "OWNER_NOTIFICATION_EMAIL", "SMTP_FROM_EMAIL", "GEMINI_API_KEY", "GROQ_API_KEY"}
+    secret_keys = {
+        "SMTP_USERNAME", "SMTP_PASSWORD", "OWNER_NOTIFICATION_EMAIL", "SMTP_FROM_EMAIL",
+        "GEMINI_API_KEY", "GROQ_API_KEY", "RESEND_API_KEY", "RESEND_FROM_EMAIL",
+    }
     for line in _env_example_lines():
         if "=" not in line or line.strip().startswith("#"):
             continue
@@ -75,6 +78,7 @@ def test_env_example_documents_every_settings_field_with_a_default_override():
         "OLLAMA_BASE_URL", "OLLAMA_MODEL", "DATABASE_URL",
         "AI_PROVIDER", "GEMINI_API_KEY", "GEMINI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
         "GROQ_MAX_TOKENS", "GROQ_EXTRACTION_MODEL", "GROQ_EXTRACTION_MAX_TOKENS",
+        "RESEND_API_KEY", "RESEND_FROM_EMAIL",
     }
     missing = expected - example_keys
     assert not missing, f".env.example is missing documented variables: {missing}"
@@ -105,6 +109,7 @@ def test_no_setting_defaults_to_a_real_looking_credential():
     assert settings.OWNER_NOTIFICATION_EMAIL == ""
     assert settings.GEMINI_API_KEY == ""
     assert settings.GROQ_API_KEY == ""
+    assert settings.RESEND_API_KEY == ""
 
 
 def test_no_env_file_is_present_in_the_repository_root():
